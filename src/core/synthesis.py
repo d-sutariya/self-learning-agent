@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Dict, Any, Tuple
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
@@ -23,15 +24,27 @@ You must write a self-contained Python function that performs this exact action.
 - The function MUST accept a single argument `params` which is a dictionary.
 - Ensure you extract parameters safely (e.g., using `params.get('key')`). If a required parameter is missing or None, raise a clear Exception.
 - The function MUST return a dictionary with the results, or raise an Exception if the API call fails.
-- CRITICAL JSON FORMATTING: You must escape all newlines in the `code` field with `\\n`. DO NOT use double quotes (`"`) inside your Python code; use single quotes (`'`) for all Python strings to avoid breaking the JSON structure.
 
-Respond ONLY with a valid JSON object matching this schema:
+Respond EXACTLY with the following two parts:
+1. A valid JSON object containing the tool metadata enclosed in ```json ... ``` tags.
+2. A Python code block containing the code enclosed in ```python ... ``` tags.
+
+Example Response format:
+```json
 {{
     "name": "snake_case_tool_name",
     "description": "Clear description of what the tool does",
-    "parameters": {{"type": "object", "properties": {{...JSON schema for params...}}}},
-    "code": "def run(params):\\n    import requests\\n    from src.config import Config\\n    headers = {{'Authorization': f'Bearer {{Config.GITHUB_TOKEN}}', 'User-Agent': 'WatermelonAgent/1.0'}}\\n    ... python code ...\\n    return {{'status': 'success'}}"
+    "parameters": {{"type": "object", "properties": {{...JSON schema for params...}}}}
 }}
+```
+```python
+def run(params):
+    import requests
+    from src.config import Config
+    headers = {{'Authorization': f'Bearer {{Config.GITHUB_TOKEN}}', 'User-Agent': 'WatermelonAgent/1.0', 'Accept': 'application/vnd.github.v3+json'}}
+    # ... your python code ...
+    return {{'status': 'success'}}
+```
 """
 
 class CapabilitySynthesizer:
@@ -50,20 +63,30 @@ class CapabilitySynthesizer:
         try:
             response = self.llm.invoke(self.prompt.format(intent=intent, params=params_str))
             
-            # Clean up potential markdown formatting around JSON
-            json_str = response.content.strip()
-            if json_str.startswith("```json"):
-                json_str = json_str[7:]
-            if json_str.endswith("```"):
-                json_str = json_str[:-3]
+            content = response.content
+            
+            # Extract JSON
+            json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
+            if not json_match:
+                # Fallback
+                json_match = re.search(r'(\{.*?\})', content, re.DOTALL)
+                if not json_match:
+                    raise Exception("Could not find JSON metadata block in response")
+            json_str = json_match.group(1)
+                
+            # Extract Python
+            python_match = re.search(r'```python\s*(.*?)\s*```', content, re.DOTALL)
+            if not python_match:
+                raise Exception("Could not find Python code block in response")
+            python_code = python_match.group(1)
                 
             data = json.loads(json_str)
             
             cap = CapabilitySchema(
-                name=data["name"],
-                description=data["description"],
-                parameters=data["parameters"],
-                code=data["code"],
+                name=data.get("name", "generated_tool"),
+                description=data.get("description", "A generated tool"),
+                parameters=data.get("parameters", {}),
+                code=python_code,
                 constraints=[]
             )
             
